@@ -1,35 +1,41 @@
-package cn.dijia478.xianhouseprice.controller;
+package cn.dijia478.xianhouseprice.task;
 
 import cn.hutool.core.date.DateUtil;
+import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.util.NumberUtil;
 import cn.hutool.poi.excel.ExcelReader;
 import cn.hutool.poi.excel.ExcelUtil;
 import cn.hutool.poi.excel.ExcelWriter;
+import lombok.extern.slf4j.Slf4j;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
 import org.jsoup.select.Elements;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.scheduling.annotation.Async;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
 import org.springframework.util.LinkedMultiValueMap;
 import org.springframework.util.MultiValueMap;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.client.RestTemplate;
 
+import java.io.File;
 import java.util.*;
 import java.util.stream.Collectors;
 
 /**
- * 房价控制层
+ * 获取房价定时任务
  *
  * @author dijia478
  * @date 2020-8-27 15:41:47
  */
-@RestController
-public class PriceController {
+@Component
+@Slf4j
+public class PriceTask {
 
     /** 面积[0,50)，价格集合 */
     private static final List<String> AREA_0_50 = new ArrayList<>();
@@ -88,23 +94,38 @@ public class PriceController {
     @Autowired
     private RestTemplate restTemplate;
 
-    @GetMapping("/dijia478/new_price")
+    /** 结果输出目录，必须为execl文件 */
+    @Value("${output-dir}")
+    private String dir;
+
+    /**
+     * 开启多线程的定时任务。程序启动后，一周执行一次
+     */
+    @Async("taskExecutor")
+    @Scheduled(fixedDelay = 604800000)
+    //    @Scheduled(fixedDelay = 60000)
     public void getNewPrice() {
-        String ipPort = "http://117.39.29.75:8085/";
-        String url = "/pricePublic/house/public/index";
-        Set<String> urlSet = new LinkedHashSet<>();
+        try {
+            log.info("开始新一次的统计，时间：{}", DateUtil.now());
+            String ipPort = "http://117.39.29.75:8085/";
+            String url = "/pricePublic/house/public/index";
 
-        // 获取所有楼盘的链接
-        getAllHouseUrl(ipPort, url, urlSet);
+            // 获取所有楼盘的链接
+            Set<String> urlSet = getAllHouseUrl(ipPort, url);
 
-        // 获取所有面积区间集合，每个集合中存储的是单价
-        getAllPriceList(ipPort, urlSet);
+            // 获取所有面积区间集合，每个集合中存储的是单价
+            getAllPriceList(ipPort, urlSet);
 
-        // 将结果写文件
-        writeResult();
+            // 将结果写文件
+            writeResult();
+        } catch (Exception e) {
+            log.error("本次统计失败", e);
+        } finally {
+            // 清空list中的值
+            clearCache();
+            log.info("本次统计结束，时间：{}", DateUtil.now());
+        }
 
-        // 清空list中的值
-        clearCache();
     }
 
     /**
@@ -120,9 +141,10 @@ public class PriceController {
      * 将结果写文件
      */
     private void writeResult() {
-        String dir = "d:/houseprice.xlsx";
+        createFile();
+
         try (ExcelReader reader = ExcelUtil.getReader(dir); ExcelWriter writer = ExcelUtil.getWriter(dir)) {
-            List<Map<String, Object>> read = reader.read(0, 0, 999);
+            List<Map<String, Object>> read = reader.readAll();
             Map<String, Object> result = new LinkedHashMap<>();
             for (Map.Entry<String, List<String>> entry : AREA_MAP.entrySet()) {
                 Double averPrice = entry.getValue().stream().map(Double::parseDouble).collect(Collectors.averagingDouble(Double::doubleValue));
@@ -131,6 +153,23 @@ public class PriceController {
             }
             read.add(result);
             writer.write(read, true);
+        }
+    }
+
+    /**
+     * 如果没有，则创建文件
+     */
+    private void createFile() {
+        File file = FileUtil.file(dir);
+        if (!file.getParentFile().exists()) {
+            file.getParentFile().mkdirs();
+        }
+
+        if (!file.exists()) {
+            ExcelWriter excelWriter = new ExcelWriter(dir);
+            excelWriter.writeRow(new ArrayList<>());
+            excelWriter.flush();
+            excelWriter.close();
         }
     }
 
@@ -204,9 +243,9 @@ public class PriceController {
      *
      * @param ipPort
      * @param url
-     * @param urlSet
      */
-    private void getAllHouseUrl(String ipPort, String url, Set<String> urlSet) {
+    private Set<String> getAllHouseUrl(String ipPort, String url) {
+        Set<String> urlSet = new LinkedHashSet<>();
         int page = 1;
         while (true) {
             String result = getHouseInfo(ipPort, url, page++);
@@ -224,6 +263,7 @@ public class PriceController {
                 urlSet.add(houseUrl);
             }
         }
+        return urlSet;
     }
 
     /**
