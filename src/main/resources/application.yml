@@ -1,0 +1,7 @@
+server:
+  port: 8478
+
+# 结果输出目录，必须为xlsx文件
+output-dir: d:\\西安房屋均价.xlsx
+# 定时任务执行间隔，默认每周一早上8点执行
+task-cron: 0 0 8 ? * MON

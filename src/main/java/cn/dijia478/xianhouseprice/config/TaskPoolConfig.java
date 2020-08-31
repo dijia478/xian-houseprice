@@ -8,8 +8,7 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.ThreadPoolExecutor;
 
 /**
- * 自定义线程池设置，其实本程序的定时任务并不需要多线程，
- * 但是为了顺便演示下多线程的定时任务如何创建，在这里就创建成多线程的定时任务
+ * 自定义线程池设置
  *
  * @author dijia478
  * @date 2020-8-31 10:01:54

@@ -24,6 +24,7 @@ import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.RestTemplate;
 
 import java.io.File;
+import java.math.BigDecimal;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -94,16 +95,18 @@ public class PriceTask {
     @Autowired
     private RestTemplate restTemplate;
 
-    /** 结果输出目录，必须为execl文件 */
+    /** 结果输出目录 */
     @Value("${output-dir}")
     private String dir;
 
     /**
-     * 开启多线程的定时任务。程序启动后，一周执行一次
+     * 开启多线程的定时任务。程序启动后，一周执行一次。
+     * 其实本程序的定时任务并不需要多线程，
+     * 但是为了顺便演示下多线程的定时任务如何创建，在这里就创建成多线程的定时任务。
      */
     @Async("taskExecutor")
-    @Scheduled(fixedDelay = 604800000)
-    //    @Scheduled(fixedDelay = 60000)
+    @Scheduled(cron = "${task-cron}")
+//    @Scheduled(fixedDelay = 60000)
     public void getNewPrice() {
         try {
             log.info("开始新一次的统计，时间：{}", DateUtil.now());
@@ -146,10 +149,12 @@ public class PriceTask {
         try (ExcelReader reader = ExcelUtil.getReader(dir); ExcelWriter writer = ExcelUtil.getWriter(dir)) {
             List<Map<String, Object>> read = reader.readAll();
             Map<String, Object> result = new LinkedHashMap<>();
+            result.put("日期", DateUtil.today());
             for (Map.Entry<String, List<String>> entry : AREA_MAP.entrySet()) {
-                Double averPrice = entry.getValue().stream().map(Double::parseDouble).collect(Collectors.averagingDouble(Double::doubleValue));
-                result.put("日期", DateUtil.today());
-                result.put(entry.getKey(), NumberUtil.roundStr(averPrice, 2));
+                double averPrice = entry.getValue().stream().mapToDouble(Double::parseDouble).average().orElse(0D);
+                String averPriceStr = NumberUtil.roundStr(averPrice, 2);
+                log.info("面积区间在 {} 中的有 {} 套，均价是 {}", entry.getKey(), entry.getValue().size(), averPriceStr);
+                result.put(entry.getKey(), averPriceStr);
             }
             read.add(result);
             writer.write(read, true);
@@ -180,25 +185,33 @@ public class PriceTask {
      * @param urlSet
      */
     private void getAllPriceList(String ipPort, Set<String> urlSet) {
-        int page = 1;
-        for (String houseUrl : urlSet) {
-            String[] split = houseUrl.split("\\?id=");
-            String result = getHousePrice(ipPort, split[0], split[1], page++);
-            Document parse = Jsoup.parse(result);
-            Elements tbody = parse.getElementsByTag("tbody");
-            Element element = tbody.get(1);
-            Elements tr = element.getElementsByTag("tr");
-            for (Element value : tr) {
-                Elements td = value.getElementsByTag("td");
-                String area = td.get(2).text();
-                String price = td.get(3).text();
-                addPriceToList(area, price);
-            }
 
-            try {
-                Thread.sleep(100L);
-            } catch (InterruptedException e) {
-                e.printStackTrace();
+        for (String houseUrl : urlSet) {
+            int page = 1;
+            while (true) {
+                String[] split = houseUrl.split("\\?id=");
+                String result = getHousePrice(ipPort, split[0], split[1], page++);
+                Document parse = Jsoup.parse(result);
+                Elements tbody = parse.getElementsByTag("tbody");
+                Element element = tbody.get(1);
+                Elements tr = element.getElementsByTag("tr");
+                if (tr.size() == 0) {
+                    break;
+                }
+
+                for (Element value : tr) {
+                    Elements td = value.getElementsByTag("td");
+                    String area = td.get(2).text();
+                    String price = td.get(3).text();
+                    addPriceToList(area, price);
+                }
+
+                try {
+                    // 防止把政府网站给调崩了
+                    Thread.sleep(100L);
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
             }
         }
     }
@@ -250,7 +263,6 @@ public class PriceTask {
         while (true) {
             String result = getHouseInfo(ipPort, url, page++);
 
-            assert result != null;
             Document parse = Jsoup.parse(result);
             Elements listTable = parse.getElementsByClass("listTable");
             Elements select = listTable.select("a[href]");
@@ -261,6 +273,13 @@ public class PriceTask {
             for (Element element : select) {
                 String houseUrl = element.attributes().get("href");
                 urlSet.add(houseUrl);
+            }
+
+            try {
+                // 防止把政府网站给调崩了
+                Thread.sleep(100L);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
             }
         }
         return urlSet;
