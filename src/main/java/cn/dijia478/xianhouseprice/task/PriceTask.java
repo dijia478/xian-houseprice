@@ -1,5 +1,6 @@
 package cn.dijia478.xianhouseprice.task;
 
+import cn.dijia478.xianhouseprice.service.PriceService;
 import cn.hutool.core.date.DateUtil;
 import cn.hutool.core.io.FileUtil;
 import cn.hutool.core.util.NumberUtil;
@@ -13,20 +14,12 @@ import org.jsoup.nodes.Element;
 import org.jsoup.select.Elements;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.HttpEntity;
-import org.springframework.http.HttpHeaders;
-import org.springframework.http.MediaType;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
-import org.springframework.util.LinkedMultiValueMap;
-import org.springframework.util.MultiValueMap;
-import org.springframework.web.client.RestTemplate;
 
 import java.io.File;
-import java.math.BigDecimal;
 import java.util.*;
-import java.util.stream.Collectors;
 
 /**
  * 获取房价定时任务
@@ -77,6 +70,12 @@ public class PriceTask {
     /** 所有价格集合的集合 */
     private static final Map<String, List<String>> AREA_MAP = new LinkedHashMap<>();
 
+    /** 毛坯房 */
+    private static final String ROUGHCAST = "毛坯";
+
+    /** 精装房 */
+    private static final String DECORATION = "精装";
+
     static {
         AREA_MAP.put("[0,50)", AREA_0_50);
         AREA_MAP.put("[50,60)", AREA_50_60);
@@ -93,7 +92,7 @@ public class PriceTask {
     }
 
     @Autowired
-    private RestTemplate restTemplate;
+    private PriceService priceService;
 
     /** 结果输出目录 */
     @Value("${output-dir}")
@@ -106,7 +105,7 @@ public class PriceTask {
      */
     @Async("taskExecutor")
     @Scheduled(cron = "${task-cron}")
-//    @Scheduled(fixedDelay = 60000)
+//    @Scheduled(fixedDelay = 120000)
     public void getNewPrice() {
         try {
             log.info("开始新一次的统计，时间：{}", DateUtil.now());
@@ -116,11 +115,20 @@ public class PriceTask {
             // 获取所有楼盘的链接
             Set<String> urlSet = getAllHouseUrl(ipPort, url);
 
-            // 获取所有面积区间集合，每个集合中存储的是单价
-            getAllPriceList(ipPort, urlSet);
+            // 获取所有毛坯房面积区间集合，每个集合中存储的是单价
+            getAllPriceList(ipPort, urlSet, ROUGHCAST);
 
-            // 将结果写文件
-            writeResult();
+            // 将毛坯房结果写文件
+            writeResult(ROUGHCAST);
+
+            // 清空list中的值
+            clearCache();
+
+            // 获取所有精装房面积区间集合，每个集合中存储的是单价
+            getAllPriceList(ipPort, urlSet, DECORATION);
+
+            // 将精装房结果写文件
+            writeResult(DECORATION);
         } catch (Exception e) {
             log.error("本次统计失败", e);
         } finally {
@@ -142,18 +150,22 @@ public class PriceTask {
 
     /**
      * 将结果写文件
+     *
+     * @param type
      */
-    private void writeResult() {
-        createFile();
+    private void writeResult(String type) {
+        // 创建文件
+        String fileUrl = createFile(type);
 
-        try (ExcelReader reader = ExcelUtil.getReader(dir); ExcelWriter writer = ExcelUtil.getWriter(dir)) {
+        try (ExcelReader reader = ExcelUtil.getReader(fileUrl); ExcelWriter writer = ExcelUtil.getWriter(fileUrl)) {
             List<Map<String, Object>> read = reader.readAll();
             Map<String, Object> result = new LinkedHashMap<>();
             result.put("日期", DateUtil.today());
+            log.info("{}房：", type);
             for (Map.Entry<String, List<String>> entry : AREA_MAP.entrySet()) {
                 double averPrice = entry.getValue().stream().mapToDouble(Double::parseDouble).average().orElse(0D);
                 String averPriceStr = NumberUtil.roundStr(averPrice, 2);
-                log.info("面积区间在 {} 中的有 {} 套，均价是 {}", entry.getKey(), entry.getValue().size(), averPriceStr);
+                log.info("{}房面积区间在 {} 中的有 {} 套，均价是 {}", type, entry.getKey(), entry.getValue().size(), averPriceStr);
                 result.put(entry.getKey(), averPriceStr);
             }
             read.add(result);
@@ -163,19 +175,25 @@ public class PriceTask {
 
     /**
      * 如果没有，则创建文件
+     * 对配置文件中的dir文件名做了修改，返回要创建的文件目录
+     *
+     * @param type
      */
-    private void createFile() {
-        File file = FileUtil.file(dir);
+    private String createFile(String type) {
+        String substring = dir.substring(0, dir.length() - 6);
+        String fileUrl = substring + "(" + type + ")" + ".xlsx";
+        File file = FileUtil.file(fileUrl);
         if (!file.getParentFile().exists()) {
             file.getParentFile().mkdirs();
         }
 
         if (!file.exists()) {
-            ExcelWriter excelWriter = new ExcelWriter(dir);
+            ExcelWriter excelWriter = new ExcelWriter(fileUrl);
             excelWriter.writeRow(new ArrayList<>());
             excelWriter.flush();
             excelWriter.close();
         }
+        return fileUrl;
     }
 
     /**
@@ -183,16 +201,26 @@ public class PriceTask {
      *
      * @param ipPort
      * @param urlSet
+     * @param type
      */
-    private void getAllPriceList(String ipPort, Set<String> urlSet) {
+    private void getAllPriceList(String ipPort, Set<String> urlSet, String type) {
 
         for (String houseUrl : urlSet) {
             int page = 1;
             while (true) {
                 String[] split = houseUrl.split("\\?id=");
-                String result = getHousePrice(ipPort, split[0], split[1], page++);
+                String result = priceService.getHousePrice(ipPort, split[0], split[1], page++);
                 Document parse = Jsoup.parse(result);
                 Elements tbody = parse.getElementsByTag("tbody");
+                // 获取房屋类型，精装或毛坯
+                Element elementType = tbody.get(0);
+                Elements trType = elementType.getElementsByTag("tr");
+                String houseType = trType.get(0).getElementsByTag("td").get(3).text();
+                if (!type.equals(houseType)) {
+                    break;
+                }
+
+                // 获取房屋面积，价格
                 Element element = tbody.get(1);
                 Elements tr = element.getElementsByTag("tr");
                 if (tr.size() == 0) {
@@ -261,7 +289,7 @@ public class PriceTask {
         Set<String> urlSet = new LinkedHashSet<>();
         int page = 1;
         while (true) {
-            String result = getHouseInfo(ipPort, url, page++);
+            String result = priceService.getHouseInfo(ipPort, url, page++);
 
             Document parse = Jsoup.parse(result);
             Elements listTable = parse.getElementsByClass("listTable");
@@ -283,45 +311,6 @@ public class PriceTask {
             }
         }
         return urlSet;
-    }
-
-    /**
-     * 获取楼盘价格
-     *
-     * @param ipPort
-     * @param url
-     * @param page
-     * @return
-     */
-    private String getHousePrice(String ipPort, String url, String id, int page) {
-        HttpHeaders httpHeaders = new HttpHeaders();
-        httpHeaders.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
-        MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
-        body.add("page", String.valueOf(page));
-        body.add("size", "15");
-        body.add("id", id);
-
-        HttpEntity<MultiValueMap<String, String>> entity = new HttpEntity<>(body, httpHeaders);
-        return restTemplate.postForObject(ipPort + url, entity, String.class);
-    }
-
-    /**
-     * 获取楼盘信息
-     *
-     * @param ipPort
-     * @param url
-     * @param page
-     * @return
-     */
-    private String getHouseInfo(String ipPort, String url, int page) {
-        HttpHeaders httpHeaders = new HttpHeaders();
-        httpHeaders.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
-        MultiValueMap<String, String> body = new LinkedMultiValueMap<>();
-        body.add("page", String.valueOf(page));
-        body.add("size", "15");
-
-        HttpEntity<MultiValueMap<String, String>> entity = new HttpEntity<>(body, httpHeaders);
-        return restTemplate.postForObject(ipPort + url, entity, String.class);
     }
 
 }
