@@ -105,7 +105,7 @@ public class PriceTask {
      */
     @Async("taskExecutor")
     @Scheduled(cron = "${task-cron}")
-//    @Scheduled(fixedDelay = 120000)
+    // @Scheduled(fixedDelay = 120000)
     public void getNewPrice() {
         try {
             log.info("开始新一次的统计，时间：{}", DateUtil.now());
@@ -180,7 +180,7 @@ public class PriceTask {
      * @param type
      */
     private String createFile(String type) {
-        String substring = dir.substring(0, dir.length() - 6);
+        String substring = dir.substring(0, dir.length() - 5);
         String fileUrl = substring + "(" + type + ")" + ".xlsx";
         File file = FileUtil.file(fileUrl);
         if (!file.getParentFile().exists()) {
